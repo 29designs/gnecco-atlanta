@@ -1,0 +1,285 @@
+// Modified by dan@marginallyclever.com 2015-07-03
+
+/*  OctoWS2811 movie2serial.pde - Transmit video data to 1 or more
+      Teensy 3.0 boards running OctoWS2811 VideoDisplay.ino
+    http://www.pjrc.com/teensy/td_libs_OctoWS2811.html
+    Copyright (c) 2013 Paul Stoffregen, PJRC.COM, LLC
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+    THE SOFTWARE.
+*/
+
+// To configure this program, edit the following sections:
+//
+//  1: change myMovie to open a video file of your choice    ;-)
+//
+//  2: edit the serialConfigure() lines in setup() for your
+//     serial device names (Mac, Linux) or COM ports (Windows)
+//
+//  3: if your LED strips have unusual color configuration,
+//     edit colorWiring().  Nearly all strips have GRB wiring,
+//     so normally you can leave this as-is.
+//
+//  4: if playing 50 or 60 Hz progressive video (or faster),
+//     edit framerate in movieEvent().
+
+//#define IS_VHS_WALL
+
+import processing.video.*;
+import processing.serial.*;
+import java.awt.Rectangle;
+
+SimpleScreenCapture simpleScreenCapture;
+
+final int SCREEN_WIDTH = 60;  // the total width of your wall
+final int SCREEN_HEIGHT = 36;  // the total height of your wall
+
+float gamma = 1.7;
+
+int numPorts=0;  // the number of serial ports in use
+int maxPorts=24; // maximum number of serial ports
+
+Serial[] ledSerial = new Serial[maxPorts];     // each port's actual Serial port
+Rectangle[] ledArea = new Rectangle[maxPorts]; // the area of the movie each port gets, in % (0-100)
+boolean[] ledLayout = new boolean[maxPorts];   // layout of rows, true = even is left->right
+PImage[] ledImage = new PImage[maxPorts];      // image sent to each port
+int errorCount=0;
+float framerate=0;
+int maxW,maxH;
+PImage img;// = new PImage();
+//PImage cpy = new PImage();
+byte[] ledData;
+int [] ledLookup;
+
+
+void setup() {
+  maxW=maxH=0;
+  String[] list = Serial.list();
+  delay(20);
+  println("Serial Ports List:");
+  println(list);
+  //serialConfigure("/dev/tty.usbmodem315451");  // change these to your port names
+  serialConfigure(list[list.length-1]);  // connects to the last port by default.
+  if (errorCount > 0) exit();
+  
+  int size=(maxW * maxH * 3);
+  ledData =  new byte[size+3];
+  ledData[size+0]=0;
+  ledData[size+1]=0;
+  ledData[size+2]=0;
+  generateLookupTable();
+    
+  size(640,480);  // create the window.  Change this to match your aspect ratio.
+  simpleScreenCapture = new SimpleScreenCapture();
+}
+
+
+void generateLookupTable() {
+  int size=(maxW * maxH * 3);
+  ledLookup = new int[size+3];
+  
+  int offset=0, x, y,v;
+
+  for (y = 0; y < maxH; y++) {
+    for (x = 0; x < maxW; x++) {
+      v = led_map(x,y)*3;
+      ledLookup[offset++] = v;
+      ledLookup[offset++] = v+1;
+      ledLookup[offset++] = v+2;
+    }
+  }
+}
+
+
+// runs for each new frame of movie data
+void movieEvent() {
+  // read the movie's next frame
+  img = simpleScreenCapture.get();
+  
+  //cpy.copy(img,0,0,img.width,img.height,0,0,img.width,img.height);
+  
+  for (int i=0; i < numPorts; i++) {    
+    // copy a portion of the movie's image to the LED image
+    int xoffset = percentage(img.width, ledArea[i].x);
+    int yoffset = percentage(img.height, ledArea[i].y);
+    int xwidth =  percentage(img.width, ledArea[i].width);
+    int yheight = percentage(img.height, ledArea[i].height);
+    ledImage[i].copy(img, xoffset, yoffset, xwidth, yheight,
+                     0, 0, ledImage[i].width, ledImage[i].height);
+    // convert the LED image to raw data
+    image2data(ledImage[i], ledData, ledLayout[i]);/*
+    if (i == 0) {
+      ledData[0] = '*';  // first Teensy is the frame sync master
+      int usec = (int)((1000000.0 / framerate) * 0.75);
+      ledData[1] = (byte)(usec);   // request the frame sync pulse
+      ledData[2] = (byte)(usec >> 8); // at 75% of the frame time
+    } else {
+      ledData[0] = '%';  // others sync to the master board
+      ledData[1] = 0;
+      ledData[2] = 0;
+    }*/
+    // send the raw data to the LEDs  :-)
+    ledSerial[i].write(ledData); 
+  }
+}
+
+
+// this is the more common sensible left-to-right, then right-to-left wiring.
+int led_map(int input) {  
+  int y = input / ( SCREEN_WIDTH );
+  int x = input % ( SCREEN_WIDTH );
+  
+  // every second row is right to left
+  if( (y % 2)==1 ) x = SCREEN_WIDTH - 1 - x;
+
+  int output = y * SCREEN_WIDTH + x;
+  return output;
+}
+
+
+int led_map(int x,int y) {
+  return led_map(y * SCREEN_WIDTH + x);
+}
+
+
+
+/**
+ * image2data converts an image to OctoWS2811's raw data format.
+ * The data array must be the proper size for the image.
+ * The only truly black pixel is the frame marker.  Black is the most important color!
+ */
+void image2data(PImage image, byte[] data, boolean layout) {
+  int offset=0, y, pixel,r,g,b;
+  int size = image.height * image.width;
+
+  for (y = 0; y < size; y++) {
+    pixel = image.pixels[y];
+    r = ( pixel & 0xFF0000 ) >> 16; 
+    g = ( pixel & 0x00FF00 ) >>  8; 
+    b = ( pixel & 0x0000FF );
+    
+    if( r==0 ) r=1;
+    if( g==0 ) g=1;
+    if( b==0 ) b=1;
+    
+    // TODO optimize to not call led_map every pixel every frame.
+    data[ledLookup[offset++]] = (byte)(r);
+    data[ledLookup[offset++]] = (byte)(g);
+    data[ledLookup[offset++]] = (byte)(b);
+  }
+}
+
+
+// ask a Teensy board for its LED configuration, and set up the info for it.
+void serialConfigure(String portName) {
+  if (numPorts >= maxPorts) {
+    println("too many serial ports, please increase maxPorts");
+    errorCount++;
+    return;
+  }
+  try {
+    ledSerial[numPorts] = new Serial(this, portName);
+    if (ledSerial[numPorts] == null) throw new NullPointerException();
+    ledSerial[numPorts].write('?');
+  } catch (Throwable e) {
+    println("Serial port " + portName + " does not exist or is non-functional");
+    errorCount++;
+    return;
+  }
+  delay(50);/*
+  String line = ledSerial[numPorts].readStringUntil(10);
+  if (line == null) {
+    println("Serial port " + portName + " is not responding.");
+    println("Is it really a Teensy 3.0 running VideoDisplay?");
+    errorCount++;
+    return;
+  }
+  */
+  print("port "+numPorts+": ");
+  String line = SCREEN_WIDTH+","+SCREEN_HEIGHT+",0,0,0,0,0,100,100,0,0,0";
+  String param[] = line.split(",");
+  if (param.length != 12) {
+    println("Error: port " + portName + " did not respond to LED config query");
+    errorCount++;
+    return;
+  }
+  int w = Integer.parseInt(param[0]);
+  int h = Integer.parseInt(param[1]);
+  // only store the info and increase numPorts if Teensy responds properly
+  ledImage[numPorts] = new PImage(w, h, RGB);
+  ledArea[numPorts] = new Rectangle(Integer.parseInt(param[5]), Integer.parseInt(param[6]),
+                     Integer.parseInt(param[7]), Integer.parseInt(param[8]));
+  ledLayout[numPorts] = (Integer.parseInt(param[5]) == 0);
+  numPorts++;
+  if(maxW < w) maxW = w;
+  if(maxH < h) maxH = h;
+}
+
+
+// draw runs every time the screen is redrawn - show the movie...
+void draw() {
+  movieEvent();
+   
+  // show the original video
+  //image(img, 0,80,640,415);
+  image(ledImage[0], 0,80,width,height-80);
+  
+  // then try to show what was most recently sent to the LEDs
+  // by displaying all the images for each port.
+  for (int i=0; i < numPorts; i++) {
+    // compute the intended size of the entire LED array
+    int xsize = percentageInverse(ledImage[i].width, ledArea[i].width);
+    int ysize = percentageInverse(ledImage[i].height, ledArea[i].height);
+    // computer this image's position within it
+    int xloc =  percentage(xsize, ledArea[i].x);
+    int yloc =  percentage(ysize, ledArea[i].y);
+    // show what should appear on the LEDs
+    image(ledImage[i], 240 - xsize / 2 + xloc, 10 + yloc);
+  }
+}
+
+
+// scale a number by a percentage, from 0 to 100
+int percentage(int num, int percent) {
+  double mult = percentageFloat(percent);
+  double output = num * mult;
+  return (int)output;
+}
+
+
+// scale a number by the inverse of a percentage, from 0 to 100
+int percentageInverse(int num, int percent) {
+  double div = percentageFloat(percent);
+  double output = num / div;
+  return (int)output;
+}
+
+
+// convert an integer from 0 to 100 to a float percentage
+// from 0.0 to 1.0.  Special cases for 1/3, 1/6, 1/7, etc
+// are handled automatically to fix integer rounding.
+double percentageFloat(int percent) {
+  if (percent == 33) return 1.0 / 3.0;
+  if (percent == 17) return 1.0 / 6.0;
+  if (percent == 14) return 1.0 / 7.0;
+  if (percent == 13) return 1.0 / 8.0;
+  if (percent == 11) return 1.0 / 9.0;
+  if (percent ==  9) return 1.0 / 11.0;
+  if (percent ==  8) return 1.0 / 12.0;
+  return (double)percent / 100.0;
+}
