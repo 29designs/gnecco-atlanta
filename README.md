@@ -2,5 +2,5 @@
 
 # TODO
 
-[] Set up the Raspberry Pi
-[] Connect Arduino & Processing sketches to Raspberry Pi
+[ ] Set up the Raspberry Pi
+[ ] Connect Arduino & Processing sketches to Raspberry Pi
